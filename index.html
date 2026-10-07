@@ -1,0 +1,943 @@
+﻿<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+
+<style>
+
+body{
+font-family:sans-serif;
+margin:12px;
+position:relative;
+}
+
+.appLayout{
+display:flex;
+gap:14px;
+align-items:flex-start;
+flex-wrap:nowrap;
+}
+
+.controlPanel{
+width:280px;
+min-width:260px;
+padding:16px;
+background:#f7f7f7;
+border-radius:10px;
+border:1px solid #e1e1e1;
+}
+
+.controlPanel h3,
+.analysisPanel h3{
+margin-top:0;
+margin-bottom:12px;
+}
+
+.fieldBlock{
+margin-bottom:14px;
+}
+
+.fieldBlock label{
+display:block;
+font-size:14px;
+margin-bottom:6px;
+}
+
+.buttonRow{
+display:flex;
+flex-wrap:wrap;
+gap:8px;
+}
+
+.analysisPanel{
+flex:1;
+min-width:0;
+}
+
+canvas{
+border:1px solid black;
+cursor:crosshair;
+display:block;
+}
+
+/* キャンバスとクレジットをまとめる */
+
+.canvasContainer{
+width:100%;
+}
+
+canvas{
+width:100%;
+height:auto;
+}
+
+/* 指定されたクレジット */
+
+.credit{
+font-size:12px;
+color:#666;
+font-style:italic;
+position:absolute;
+top:10px;
+right:12px;
+z-index:1000;
+pointer-events:none;
+}
+
+button{
+margin:5px;
+padding:6px 10px;
+}
+
+#manual{
+margin-top:40px;
+padding:20px;
+background:#f5f5f5;
+border-radius:10px;
+width:calc(100% - 24px);
+max-width:none;
+box-sizing:border-box;
+}
+
+#manual h3{
+margin-top:0;
+}
+
+#manual .nowrapText{
+white-space:nowrap;
+}
+
+#manual li{
+margin-bottom:10px;
+}
+
+#frameSlider{
+width:100%;
+}
+
+@media (max-width:1100px){
+.appLayout{
+flex-wrap:wrap;
+}
+
+.analysisPanel{
+min-width:320px;
+}
+}
+
+</style>
+
+</head>
+
+<body>
+
+<h2>Video Tracking Tool</h2>
+
+<div class="appLayout">
+
+<div class="controlPanel">
+<h3>設定</h3>
+
+<div class="fieldBlock">
+<label for="fpsInput">動画fps</label>
+<input id="fpsInput" type="number" value="30">
+<button onclick="setFPS()">fps設定</button>
+</div>
+
+<div class="fieldBlock">
+<label for="videoFile">動画ファイル</label>
+<input type="file" id="videoFile">
+</div>
+
+<div class="fieldBlock">
+<div class="buttonRow">
+<button onclick="mode='origin'">原点設定</button>
+<button onclick="startScale()">スケール設定</button>
+</div>
+</div>
+
+<div class="fieldBlock">
+<label>
+<input id="gridToggle" type="checkbox" checked>
+グリッド線を表示
+</label>
+</div>
+
+<div class="fieldBlock">
+<label for="scaleInput">距離(m)</label>
+<input id="scaleInput" type="number" value="1" step="0.01">
+</div>
+
+<div class="fieldBlock">
+<label for="pointCount">トラッキング点数</label>
+<input id="pointCount" type="number" value="1">
+<button onclick="initPoints()">設定</button>
+</div>
+
+<div class="fieldBlock">
+<button onclick="mode='track'">トラッキング</button>
+</div>
+
+<div class="fieldBlock">
+<div class="buttonRow">
+<button onclick="exportCSV()">CSV保存</button>
+<button onclick="exportJSON()">JSON保存</button>
+<button onclick="openJSONFile()">JSON読込</button>
+<input type="file" id="jsonFile" accept="application/json,.json" style="display:none;">
+</div>
+</div>
+</div>
+
+<div class="analysisPanel">
+<h3>分析画面</h3>
+
+<label for="frameSlider">フレーム</label>
+<input id="frameSlider" type="range" min="0" value="0" step="1">
+<div>現在のフレーム: <span id="currentFrame">0</span></div>
+
+<div class="buttonRow" style="margin-top:10px; margin-bottom:14px;">
+<button onclick="prevFrame()">◀ frame</button>
+<button onclick="nextFrame()">frame ▶</button>
+<button onclick="clearCurrentFrameTracking()">このフレームのトラッキングを消去</button>
+</div>
+
+<div class="canvasContainer">
+
+<div class="credit">by Kazuki Kitaoka</div>
+
+<canvas id="canvas" width="640" height="360"></canvas>
+
+</div>
+</div>
+
+</div>
+
+<video id="video" style="display:none"></video>
+
+<script>
+
+const video=document.getElementById("video")
+const canvas=document.getElementById("canvas")
+const ctx=canvas.getContext("2d")
+
+let frameRate=30
+let mode="track"
+
+let origin=null
+let scale=1
+
+let scaleLine=null
+let dragging=false
+
+let tracks=[]
+let pointNum=1
+let currentPoint=0
+let currentFrame=0
+let totalFrames=0
+let pendingFrameFromImport=null
+let showGrid=true
+let isSteppingFrame=false
+let drawLoopStarted=false
+
+const SEEK_TIMEOUT_MS=800
+
+
+document.getElementById("gridToggle").addEventListener("change",e=>{
+showGrid=e.target.checked
+})
+
+
+function updateFrameUI(){
+document.getElementById("currentFrame").textContent = currentFrame
+document.getElementById("frameSlider").value = currentFrame
+}
+
+
+function getFrameTime(frame){
+return frame / frameRate
+}
+
+
+function getPointFrame(p){
+if(Number.isFinite(p.frame)) return p.frame
+if(Number.isFinite(p.t)) return Math.round(p.t * frameRate)
+return null
+}
+
+
+function upsertTrackPoint(trackIndex, frame, x, y){
+if(!tracks[trackIndex]) tracks[trackIndex]=[]
+
+const t=getFrameTime(frame)
+const newPoint={frame,t,x,y}
+const track=tracks[trackIndex]
+
+const existingIndex=track.findIndex(p=>getPointFrame(p)===frame)
+if(existingIndex>=0){
+track[existingIndex]=newPoint
+return
+}
+
+const insertAt=track.findIndex(p=>{
+const pf=getPointFrame(p)
+return Number.isFinite(pf) && pf>frame
+})
+
+if(insertAt>=0){
+track.splice(insertAt,0,newPoint)
+}else{
+track.push(newPoint)
+}
+}
+
+
+function setFrame(frame){
+if(totalFrames<=0) return
+currentFrame = Math.min(totalFrames-1, Math.max(0, frame))
+video.currentTime = getFrameTime(currentFrame)
+updateFrameUI()
+}
+
+
+function seekToFrame(frame){
+return new Promise(resolve=>{
+if(totalFrames<=0){
+resolve(false)
+return
+}
+
+currentFrame = Math.min(totalFrames-1, Math.max(0, frame))
+let finished=false
+
+const finish=(ok)=>{
+if(finished) return
+finished=true
+clearTimeout(timeoutId)
+resolve(ok)
+}
+
+const onSeeked=()=>{
+video.removeEventListener("seeked",onSeeked)
+finish(true)
+}
+
+video.addEventListener("seeked",onSeeked,{once:true})
+video.currentTime = getFrameTime(currentFrame)
+updateFrameUI()
+
+const timeoutId=setTimeout(()=>{
+video.removeEventListener("seeked",onSeeked)
+finish(false)
+},SEEK_TIMEOUT_MS)
+})
+}
+
+
+async function stepToVisibleFrame(direction){
+if(totalFrames<=0 || video.readyState<2 || isSteppingFrame) return
+
+isSteppingFrame=true
+
+try{
+const baseTime=video.currentTime
+const maxProbe=24
+let moved=false
+
+for(let i=0;i<maxProbe;i++){
+const next=currentFrame+direction
+if(next<0 || next>=totalFrames) break
+
+const seekOk=await seekToFrame(next)
+if(!seekOk) break
+
+const delta=Math.abs(video.currentTime-baseTime)
+
+if(delta>1e-4){
+moved=true
+break
+}
+}
+
+if(!moved){
+const fallback=currentFrame+direction
+if(fallback>=0 && fallback<totalFrames){
+await seekToFrame(fallback)
+}
+}
+}finally{
+isSteppingFrame=false
+}
+}
+
+
+function setFPS(){
+const inputFps = parseFloat(document.getElementById("fpsInput").value)
+if(!Number.isFinite(inputFps) || inputFps<=0){
+alert("fpsは0より大きい値を入力してください")
+return
+}
+
+const oldFrameRate = frameRate
+frameRate=inputFps
+
+if(video.readyState>=2){
+ const timeBeforeChange = currentFrame / oldFrameRate
+ totalFrames = Math.max(1, Math.floor(video.duration * frameRate))
+ const slider = document.getElementById("frameSlider")
+ slider.max = totalFrames - 1
+ currentFrame = Math.min(totalFrames-1, Math.max(0, Math.round(timeBeforeChange * frameRate)))
+ video.currentTime = getFrameTime(currentFrame)
+ updateFrameUI()
+}
+}
+
+
+function handleVideoLoadedData(){
+canvas.width=640
+canvas.height=Math.round(canvas.width*video.videoHeight/video.videoWidth)
+setFPS()
+totalFrames = Math.max(1, Math.floor(video.duration * frameRate))
+const slider = document.getElementById("frameSlider")
+slider.max = totalFrames - 1
+video.pause()
+
+if(pendingFrameFromImport!==null){
+setFrame(pendingFrameFromImport)
+pendingFrameFromImport=null
+}else{
+setFrame(0)
+}
+
+startDrawLoop()
+}
+
+
+function handleFrameSliderInput(e){
+if(totalFrames<=0) return
+setFrame(parseInt(e.target.value))
+}
+
+
+document.getElementById("videoFile").addEventListener("change",e=>{
+
+const file=e.target.files[0]
+if(!file) return
+
+video.src=URL.createObjectURL(file)
+})
+
+video.addEventListener("loadeddata",handleVideoLoadedData)
+
+document.getElementById("frameSlider").addEventListener("input",handleFrameSliderInput)
+
+
+function initPoints(){
+
+pointNum=parseInt(document.getElementById("pointCount").value)
+
+tracks=[]
+
+for(let i=0;i<pointNum;i++){
+tracks.push([])
+}
+
+}
+
+
+function startScale(){
+mode="scale"
+scaleLine=null
+}
+
+
+function getCanvasPoint(e){
+const rect=canvas.getBoundingClientRect()
+const scaleX=canvas.width/rect.width
+const scaleY=canvas.height/rect.height
+
+return {
+x:(e.clientX-rect.left)*scaleX,
+y:(e.clientY-rect.top)*scaleY
+}
+}
+
+
+canvas.addEventListener("mousedown",e=>{
+
+if(mode!="scale") return
+
+const p=getCanvasPoint(e)
+
+scaleLine={x1:p.x,y1:p.y,x2:p.x,y2:p.y}
+
+dragging=true
+
+})
+
+
+canvas.addEventListener("mousemove",e=>{
+
+if(!dragging) return
+
+const p=getCanvasPoint(e)
+
+scaleLine.x2=p.x
+scaleLine.y2=p.y
+
+})
+
+
+canvas.addEventListener("mouseup",e=>{
+
+if(!dragging) return
+
+dragging=false
+
+let dx=scaleLine.x2-scaleLine.x1
+let dy=scaleLine.y2-scaleLine.y1
+
+let pixelDist=Math.sqrt(dx*dx+dy*dy)
+
+let realDist=parseFloat(document.getElementById("scaleInput").value)
+
+scale=realDist/pixelDist
+
+mode="track"
+
+})
+
+
+canvas.addEventListener("click",e=>{
+
+const p=getCanvasPoint(e)
+
+let x=p.x
+let y=p.y
+
+
+if(mode=="origin"){
+
+origin={x,y}
+mode="track"
+return
+
+}
+
+
+if(mode=="track"){
+
+if(isSteppingFrame) return
+
+upsertTrackPoint(currentPoint,currentFrame,x,y)
+
+currentPoint++
+
+if(currentPoint>=pointNum){
+
+currentPoint=0
+void nextFrame()
+
+}
+
+}
+
+})
+
+
+function draw(){
+
+ctx.drawImage(video,0,0,canvas.width,canvas.height)
+
+drawGrid()
+drawAxes()
+drawScale()
+drawTracks()
+
+if(drawLoopStarted){
+requestAnimationFrame(draw)
+}
+
+}
+
+
+function startDrawLoop(){
+if(drawLoopStarted) return
+drawLoopStarted=true
+requestAnimationFrame(draw)
+}
+
+
+function drawAxes(){
+
+if(!origin) return
+
+ctx.save()
+
+ctx.lineWidth=2
+
+ctx.strokeStyle="rgba(255,80,80,0.8)"
+ctx.beginPath()
+ctx.moveTo(0,origin.y)
+ctx.lineTo(canvas.width,origin.y)
+ctx.stroke()
+
+ctx.strokeStyle="rgba(255,80,80,0.8)"
+ctx.beginPath()
+ctx.moveTo(origin.x,0)
+ctx.lineTo(origin.x,canvas.height)
+ctx.stroke()
+
+ctx.restore()
+
+}
+
+
+function drawGrid(){
+
+if(!origin || !showGrid) return
+
+const spacing=40
+
+ctx.save()
+ctx.strokeStyle="rgba(255,255,255,0.28)"
+ctx.lineWidth=1
+
+for(let x=origin.x;x<=canvas.width;x+=spacing){
+ctx.beginPath()
+ctx.moveTo(x,0)
+ctx.lineTo(x,canvas.height)
+ctx.stroke()
+}
+
+for(let x=origin.x-spacing;x>=0;x-=spacing){
+ctx.beginPath()
+ctx.moveTo(x,0)
+ctx.lineTo(x,canvas.height)
+ctx.stroke()
+}
+
+for(let y=origin.y;y<=canvas.height;y+=spacing){
+ctx.beginPath()
+ctx.moveTo(0,y)
+ctx.lineTo(canvas.width,y)
+ctx.stroke()
+}
+
+for(let y=origin.y-spacing;y>=0;y-=spacing){
+ctx.beginPath()
+ctx.moveTo(0,y)
+ctx.lineTo(canvas.width,y)
+ctx.stroke()
+}
+
+ctx.restore()
+
+}
+
+
+function drawScale(){
+
+if(!scaleLine) return
+
+ctx.beginPath()
+
+ctx.moveTo(scaleLine.x1,scaleLine.y1)
+ctx.lineTo(scaleLine.x2,scaleLine.y2)
+
+ctx.strokeStyle="yellow"
+ctx.lineWidth=3
+
+ctx.stroke()
+
+}
+
+
+function drawTracks(){
+
+tracks.forEach(track=>{
+
+ctx.strokeStyle="rgba(30,120,255,0.45)"
+ctx.lineWidth=1
+
+track.forEach(p=>{
+
+drawPlusMarker(p.x,p.y,5)
+
+})
+
+})
+
+}
+
+
+function drawPlusMarker(x,y,size){
+ctx.beginPath()
+ctx.moveTo(x-size,y)
+ctx.lineTo(x+size,y)
+ctx.moveTo(x,y-size)
+ctx.lineTo(x,y+size)
+ctx.stroke()
+}
+
+
+async function nextFrame(){
+if(totalFrames<=0) return
+await stepToVisibleFrame(1)
+}
+
+async function prevFrame(){
+if(totalFrames<=0) return
+await stepToVisibleFrame(-1)
+}
+
+
+function clearCurrentFrameTracking(){
+let removedCount=0
+
+tracks=tracks.map(track=>{
+const beforeCount=track.length
+const filtered=track.filter(p=>getPointFrame(p)!==currentFrame)
+removedCount += (beforeCount-filtered.length)
+return filtered
+})
+
+currentPoint=0
+
+if(removedCount===0){
+alert("このフレームのトラッキングデータはありません")
+return
+}
+
+alert("このフレームのトラッキングデータを消去しました")
+}
+
+
+function exportCSV(){
+
+if(!origin){
+alert("原点を設定してください")
+return
+}
+
+let csv="point,time,x(m),y(m),vx(m/s),vy(m/s),speed(m/s)\n"
+
+tracks.forEach((track,i)=>{
+
+for(let j=0;j<track.length;j++){
+
+let p=track[j]
+
+let x=(p.x-origin.x)*scale
+let y=(origin.y-p.y)*scale
+
+let vx=""
+let vy=""
+let speed=""
+
+if(j>0){
+
+let p0=track[j-1]
+
+let x0=(p0.x-origin.x)*scale
+let y0=(origin.y-p0.y)*scale
+
+let dx=x-x0
+let dy=y-y0
+
+let dt=p.t-p0.t
+
+vx=dx/dt
+vy=dy/dt
+
+speed=Math.sqrt(vx*vx+vy*vy)
+
+}
+
+csv+=`${i},${p.t},${x},${y},${vx},${vy},${speed}\n`
+
+}
+
+})
+
+const blob=new Blob([csv],{type:"text/csv"})
+
+const a=document.createElement("a")
+
+a.href=URL.createObjectURL(blob)
+a.download="tracking_data.csv"
+a.click()
+
+}
+
+
+function exportJSON(){
+
+const data={
+formatVersion:1,
+exportedAt:new Date().toISOString(),
+videoFileName:document.getElementById("videoFile").files[0]?.name || "",
+frameRate,
+showGrid,
+pointNum,
+currentPoint,
+currentFrame,
+origin,
+scale,
+tracks
+}
+
+const blob=new Blob([JSON.stringify(data,null,2)],{type:"application/json"})
+const a=document.createElement("a")
+a.href=URL.createObjectURL(blob)
+a.download="tracking_data.json"
+a.click()
+}
+
+
+function openJSONFile(){
+document.getElementById("jsonFile").click()
+}
+
+
+function sanitizeTrackPoint(p){
+if(!p || typeof p!=="object") return null
+if(!Number.isFinite(p.t) || !Number.isFinite(p.x) || !Number.isFinite(p.y)) return null
+const point={t:p.t,x:p.x,y:p.y}
+if(Number.isFinite(p.frame) && p.frame>=0){
+point.frame=Math.round(p.frame)
+}
+return point
+}
+
+
+function applyImportedData(data){
+if(!data || typeof data!=="object"){
+alert("JSONの形式が正しくありません")
+return
+}
+
+const importedFps=Number(data.frameRate)
+if(Number.isFinite(importedFps) && importedFps>0){
+frameRate=importedFps
+document.getElementById("fpsInput").value=String(frameRate)
+}
+
+showGrid=(typeof data.showGrid==="boolean") ? data.showGrid : true
+document.getElementById("gridToggle").checked=showGrid
+
+let importedPointNum=Number.parseInt(data.pointNum,10)
+if(!Number.isFinite(importedPointNum) || importedPointNum<1){
+if(Array.isArray(data.tracks) && data.tracks.length>0){
+importedPointNum=data.tracks.length
+}else{
+importedPointNum=1
+}
+}
+pointNum=importedPointNum
+document.getElementById("pointCount").value=String(pointNum)
+
+tracks=[]
+for(let i=0;i<pointNum;i++){
+const srcTrack=Array.isArray(data.tracks?.[i]) ? data.tracks[i] : []
+tracks.push(srcTrack.map(sanitizeTrackPoint).filter(Boolean))
+}
+
+if(data.origin && Number.isFinite(data.origin.x) && Number.isFinite(data.origin.y)){
+origin={x:data.origin.x,y:data.origin.y}
+}else{
+origin=null
+}
+
+const importedScale=Number(data.scale)
+scale=(Number.isFinite(importedScale) && importedScale>0) ? importedScale : 1
+
+const importedCurrentPoint=Number.parseInt(data.currentPoint,10)
+currentPoint=(Number.isFinite(importedCurrentPoint) && importedCurrentPoint>=0) ? importedCurrentPoint : 0
+if(currentPoint>=pointNum) currentPoint=0
+
+const importedCurrentFrame=Number.parseInt(data.currentFrame,10)
+const safeImportedFrame=(Number.isFinite(importedCurrentFrame) && importedCurrentFrame>=0) ? importedCurrentFrame : 0
+
+if(video.readyState>=2){
+totalFrames = Math.max(1, Math.floor(video.duration * frameRate))
+document.getElementById("frameSlider").max = totalFrames - 1
+setFrame(safeImportedFrame)
+}else{
+currentFrame=safeImportedFrame
+pendingFrameFromImport=safeImportedFrame
+document.getElementById("currentFrame").textContent = currentFrame
+}
+
+alert("JSONを読み込みました。動画をまだ読み込んでいない場合は，同じ動画を選択してください")
+}
+
+
+document.getElementById("jsonFile").addEventListener("change",e=>{
+const file=e.target.files[0]
+if(!file) return
+
+const reader=new FileReader()
+reader.onload=()=>{
+try{
+const data=JSON.parse(reader.result)
+applyImportedData(data)
+}catch(err){
+alert("JSONの読み込みに失敗しました")
+}
+e.target.value=""
+}
+reader.readAsText(file)
+})
+
+</script>
+
+
+<div id="manual">
+
+<h3>使い方（初めての方向け）</h3>
+
+<p>
+このツールは，動画上で位置をクリックして座標と速度を出すアプリです。<br>
+まずは下の手順を上から順に進めてください。
+</p>
+
+<ol>
+
+<li><b>fps設定</b>：動画のfpsを入力して「fps設定」を押します。<br>
+例：通常動画は30fps前後，スローモーション動画は120fpsや240fps。</li>
+
+<li><b>動画読み込み</b>：動画ファイルを選択します。<br>
+読み込み後に，フレームスライダーと「現在のフレーム」が使えるようになります。</li>
+
+<li><b>原点設定</b>：原点設定ボタンを押して，動画上の基準点を1回クリックします。<br>
+原点設定後は座標軸が表示されます。<br>
+「グリッド線を表示」のチェックで，補助線の表示を切り替えられます。<br>
+CSV保存には原点設定が必須です。</li>
+
+<li><b>スケール設定</b>：距離(m)に実際の長さを入力し，スケール設定ボタンを押します。<br>
+その後，動画上で既知の長さ区間をドラッグします。</li>
+
+<li><b>トラッキング点数設定</b>：1フレームで追う点の数を入力して設定を押します。<br>
+1点なら1，2点同時に追うなら2を指定します。</li>
+
+<li><b>トラッキング</b>：トラッキングボタンを押し，対象をクリックします。<br>
+指定した点数分をクリックすると，自動で次フレームに進みます。</li>
+
+<li><b>フレーム移動</b>：<span class="nowrapText">「◀ frame」「frame ▶」またはスライダーで前後のフレームへ移動できます。</span><br>
+誤クリックした場合は，前のフレームに戻って打ち直してください。</li>
+
+<li><b>CSV保存</b>：CSV保存を押すと，point，time，位置，速度が保存されます。</li>
+
+<li><b>JSON保存・JSON読込</b>：JSON保存を押すと，作業状態（fps，原点，スケール，トラックなど）を保存できます。<br>
+再開時はJSON読込で同じファイルを開き，必要に応じて同じ動画を読み込むと途中から続きができます。</li>
+
+</ol>
+
+<p>
+うまくいかない場合は，fps値，原点設定，スケール設定の順で見直すと解決しやすいです。
+</p>
+
+</div>
+
+</body>
+</html>

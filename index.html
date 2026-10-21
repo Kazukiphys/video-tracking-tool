@@ -433,13 +433,27 @@ document.getElementById("frameSlider").addEventListener("input",handleFrameSlide
 
 function initPoints(){
 
-pointNum=parseInt(document.getElementById("pointCount").value)
+const newNum=parseInt(document.getElementById("pointCount").value)
 
-tracks=[]
+if(!Number.isFinite(newNum) || newNum<1){
+alert("トラッキング点数は1以上の整数を入力してください")
+return
+}
 
-for(let i=0;i<pointNum;i++){
+const hasLostData=tracks.slice(newNum).some(t=>t.length>0)
+if(hasLostData && !confirm("点数を減らすと，削除される点のトラッキングデータが消えます。続けますか？")){
+document.getElementById("pointCount").value=String(pointNum)
+return
+}
+
+// 既存データは保持し，点数に合わせて追加・削除のみ行う
+tracks=tracks.slice(0,newNum)
+while(tracks.length<newNum){
 tracks.push([])
 }
+
+pointNum=newNum
+if(currentPoint>=pointNum) currentPoint=0
 
 }
 
@@ -783,6 +797,8 @@ currentPoint,
 currentFrame,
 origin,
 scale,
+scaleDistance:document.getElementById("scaleInput").value,
+scaleLine,
 tracks
 }
 
@@ -850,6 +866,13 @@ origin=null
 
 const importedScale=Number(data.scale)
 scale=(Number.isFinite(importedScale) && importedScale>0) ? importedScale : 1
+
+if(data.scaleDistance!==undefined){
+document.getElementById("scaleInput").value=String(data.scaleDistance)
+}
+const sl=data.scaleLine
+scaleLine=(sl && [sl.x1,sl.y1,sl.x2,sl.y2].every(Number.isFinite)) ? {x1:sl.x1,y1:sl.y1,x2:sl.x2,y2:sl.y2} : null
+mode="track"
 
 const importedCurrentPoint=Number.parseInt(data.currentPoint,10)
 currentPoint=(Number.isFinite(importedCurrentPoint) && importedCurrentPoint>=0) ? importedCurrentPoint : 0

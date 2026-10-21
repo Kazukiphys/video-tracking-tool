@@ -66,6 +66,23 @@ display:block;
 width:100%;
 }
 
+.canvasInfo{
+margin-bottom:0;
+margin-left:auto;
+text-align:right;
+font-size:13px;
+white-space:nowrap;
+}
+
+.frameToolbar{
+display:flex;
+align-items:center;
+flex-wrap:wrap;
+gap:8px;
+margin-top:10px;
+margin-bottom:14px;
+}
+
 canvas{
 width:100%;
 height:auto;
@@ -195,10 +212,15 @@ min-width:320px;
 <input id="frameSlider" type="range" min="0" value="0" step="1">
 <div>現在のフレーム: <span id="currentFrame">0</span></div>
 
-<div class="buttonRow" style="margin-top:10px; margin-bottom:14px;">
+<div class="frameToolbar">
+<div class="buttonRow">
+<button id="undoButton" onclick="undoLastAction()" disabled>戻る</button>
+<button id="redoButton" onclick="redoLastAction()" disabled>進む</button>
 <button onclick="prevFrame()">◀ frame</button>
 <button onclick="nextFrame()">frame ▶</button>
 <button onclick="clearCurrentFrameTracking()">このフレームのトラッキングを消去</button>
+</div>
+<div id="canvasInfo" class="canvasInfo">キャンバス幅: 640 px | 1 px: スケール未設定</div>
 </div>
 
 <div class="canvasContainer">
@@ -225,11 +247,15 @@ let mode="track"
 
 let origin=null
 let scale=1
+let scaleConfigured=false
 
 let scaleLine=null
 let dragging=false
+let scaleBeforeDrag=null
 
 let tracks=[]
+let undoStack=[]
+let redoStack=[]
 let pointNum=1
 let currentPoint=0
 let currentFrame=0
@@ -255,6 +281,97 @@ document.getElementById("frameSlider").value = currentFrame
 
 function getFrameTime(frame){
 return frame / frameRate
+}
+
+
+function updateCanvasInfo(){
+const scaleText=scaleConfigured ? `1 px = ${scale.toPrecision(5)} m (縦横共通)` : "1 px: スケール未設定"
+document.getElementById("canvasInfo").textContent=`キャンバス幅: ${canvas.width} px | ${scaleText}`
+}
+
+
+function updateUndoButton(){
+document.getElementById("undoButton").disabled=undoStack.length===0
+document.getElementById("redoButton").disabled=redoStack.length===0
+}
+
+
+function pushUndo(undoAction){
+undoStack.push(undoAction)
+if(undoStack.length>100) undoStack.shift()
+redoStack=[]
+updateUndoButton()
+}
+
+
+function captureAppStateUndo(){
+const state={
+frameRate,
+mode,
+origin:origin ? {...origin} : null,
+scale,
+scaleConfigured,
+scaleLine:scaleLine ? {...scaleLine} : null,
+tracks:tracks.map(track=>track.map(point=>({...point}))),
+pointNum,
+currentPoint,
+currentFrame,
+pendingFrameFromImport,
+showGrid,
+totalFrames,
+fpsInput:document.getElementById("fpsInput").value,
+scaleInput:document.getElementById("scaleInput").value,
+pointCountInput:document.getElementById("pointCount").value
+}
+
+return ()=>{
+frameRate=state.frameRate
+mode=state.mode
+origin=state.origin
+scale=state.scale
+scaleConfigured=state.scaleConfigured
+scaleLine=state.scaleLine
+tracks=state.tracks
+pointNum=state.pointNum
+currentPoint=state.currentPoint
+currentFrame=state.currentFrame
+pendingFrameFromImport=state.pendingFrameFromImport
+showGrid=state.showGrid
+totalFrames=state.totalFrames
+document.getElementById("fpsInput").value=state.fpsInput
+document.getElementById("scaleInput").value=state.scaleInput
+document.getElementById("pointCount").value=state.pointCountInput
+document.getElementById("gridToggle").checked=showGrid
+document.getElementById("frameSlider").max=Math.max(0,totalFrames-1)
+updateCanvasInfo()
+if(video.readyState>=2 && totalFrames>0){
+setFrame(currentFrame)
+}else{
+updateFrameUI()
+}
+}
+}
+
+
+function undoLastAction(){
+const undoAction=undoStack.pop()
+if(!undoAction) return
+
+redoStack.push(captureAppStateUndo())
+if(redoStack.length>100) redoStack.shift()
+undoAction()
+updateUndoButton()
+}
+
+
+function redoLastAction(){
+const redoAction=redoStack.pop()
+if(!redoAction) return
+
+undoStack.push(captureAppStateUndo())
+if(undoStack.length>100) undoStack.shift()
+redoAction()
+updateUndoButton()
 }
 
 
@@ -378,6 +495,21 @@ return
 }
 
 const oldFrameRate = frameRate
+if(inputFps===oldFrameRate) return
+const oldCurrentFrame=currentFrame
+const oldTotalFrames=totalFrames
+pushUndo(()=>{
+frameRate=oldFrameRate
+currentFrame=oldCurrentFrame
+totalFrames=oldTotalFrames
+document.getElementById("fpsInput").value=String(oldFrameRate)
+document.getElementById("frameSlider").max=Math.max(0,totalFrames-1)
+if(video.readyState>=2 && totalFrames>0){
+setFrame(oldCurrentFrame)
+}else{
+updateFrameUI()
+}
+})
 frameRate=inputFps
 
 if(video.readyState>=2){
@@ -439,12 +571,23 @@ if(!Number.isFinite(newNum) || newNum<1){
 alert("トラッキング点数は1以上の整数を入力してください")
 return
 }
+if(newNum===pointNum) return
 
 const hasLostData=tracks.slice(newNum).some(t=>t.length>0)
 if(hasLostData && !confirm("点数を減らすと，削除される点のトラッキングデータが消えます。続けますか？")){
 document.getElementById("pointCount").value=String(pointNum)
 return
 }
+
+const previousTracks=tracks
+const previousPointNum=pointNum
+const previousCurrentPoint=currentPoint
+pushUndo(()=>{
+tracks=previousTracks
+pointNum=previousPointNum
+currentPoint=previousCurrentPoint
+document.getElementById("pointCount").value=String(pointNum)
+})
 
 // 既存データは保持し，点数に合わせて追加・削除のみ行う
 tracks=tracks.slice(0,newNum)
@@ -460,7 +603,6 @@ if(currentPoint>=pointNum) currentPoint=0
 
 function startScale(){
 mode="scale"
-scaleLine=null
 }
 
 
@@ -482,6 +624,11 @@ if(mode!="scale") return
 
 const p=getCanvasPoint(e)
 
+scaleBeforeDrag={
+scale,
+scaleConfigured,
+scaleLine:scaleLine ? {...scaleLine} : null
+}
 scaleLine={x1:p.x,y1:p.y,x2:p.x,y2:p.y}
 
 dragging=true
@@ -514,7 +661,25 @@ let pixelDist=Math.sqrt(dx*dx+dy*dy)
 
 let realDist=parseFloat(document.getElementById("scaleInput").value)
 
+if(!Number.isFinite(pixelDist) || pixelDist<=0 || !Number.isFinite(realDist) || realDist<=0){
+alert("スケール設定には，0より大きい距離と長さを指定してください")
+scaleLine=scaleBeforeDrag?.scaleLine ?? null
+scaleBeforeDrag=null
+mode="track"
+return
+}
+
+const previousScale=scaleBeforeDrag
+pushUndo(()=>{
+scale=previousScale.scale
+scaleConfigured=previousScale.scaleConfigured
+scaleLine=previousScale.scaleLine
+updateCanvasInfo()
+})
 scale=realDist/pixelDist
+scaleConfigured=true
+scaleBeforeDrag=null
+updateCanvasInfo()
 
 mode="track"
 
@@ -531,6 +696,8 @@ let y=p.y
 
 if(mode=="origin"){
 
+const previousOrigin=origin ? {...origin} : null
+pushUndo(()=>{origin=previousOrigin})
 origin={x,y}
 mode="track"
 return
@@ -542,6 +709,25 @@ if(mode=="track"){
 
 if(isSteppingFrame) return
 
+const trackIndex=currentPoint
+const trackedFrame=currentFrame
+const previousCurrentPoint=currentPoint
+const previousPoint=tracks[trackIndex]?.find(point=>getPointFrame(point)===trackedFrame)
+const previousTrackPoint=previousPoint ? {...previousPoint} : null
+pushUndo(()=>{
+if(previousTrackPoint){
+upsertTrackPoint(trackIndex,trackedFrame,previousTrackPoint.x,previousTrackPoint.y)
+}else if(tracks[trackIndex]){
+tracks[trackIndex]=tracks[trackIndex].filter(point=>getPointFrame(point)!==trackedFrame)
+}
+currentPoint=previousCurrentPoint
+if(totalFrames>0){
+setFrame(trackedFrame)
+}else{
+currentFrame=trackedFrame
+updateFrameUI()
+}
+})
 upsertTrackPoint(currentPoint,currentFrame,x,y)
 
 currentPoint++
@@ -706,21 +892,22 @@ await stepToVisibleFrame(-1)
 
 
 function clearCurrentFrameTracking(){
-let removedCount=0
-
-tracks=tracks.map(track=>{
-const beforeCount=track.length
-const filtered=track.filter(p=>getPointFrame(p)!==currentFrame)
-removedCount += (beforeCount-filtered.length)
-return filtered
-})
-
-currentPoint=0
-
-if(removedCount===0){
+const clearedFrame=currentFrame
+const removedByTrack=tracks.map(track=>track.filter(point=>getPointFrame(point)===clearedFrame))
+if(!removedByTrack.some(points=>points.length>0)){
 alert("このフレームのトラッキングデータはありません")
 return
 }
+
+const previousCurrentPoint=currentPoint
+pushUndo(()=>{
+removedByTrack.forEach((points,trackIndex)=>{
+points.forEach(point=>upsertTrackPoint(trackIndex,clearedFrame,point.x,point.y))
+})
+currentPoint=previousCurrentPoint
+})
+tracks=tracks.map(track=>track.filter(point=>getPointFrame(point)!==clearedFrame))
+currentPoint=0
 
 alert("このフレームのトラッキングデータを消去しました")
 }
@@ -792,6 +979,7 @@ exportedAt:new Date().toISOString(),
 videoFileName:document.getElementById("videoFile").files[0]?.name || "",
 frameRate,
 showGrid,
+scaleConfigured,
 pointNum,
 currentPoint,
 currentFrame,
@@ -832,6 +1020,8 @@ alert("JSONの形式が正しくありません")
 return
 }
 
+pushUndo(captureAppStateUndo())
+
 const importedFps=Number(data.frameRate)
 if(Number.isFinite(importedFps) && importedFps>0){
 frameRate=importedFps
@@ -871,7 +1061,15 @@ if(data.scaleDistance!==undefined){
 document.getElementById("scaleInput").value=String(data.scaleDistance)
 }
 const sl=data.scaleLine
-scaleLine=(sl && [sl.x1,sl.y1,sl.x2,sl.y2].every(Number.isFinite)) ? {x1:sl.x1,y1:sl.y1,x2:sl.x2,y2:sl.y2} : null
+const hasScaleLine=Boolean(sl && [sl.x1,sl.y1,sl.x2,sl.y2].every(Number.isFinite))
+scaleLine=hasScaleLine ? {x1:sl.x1,y1:sl.y1,x2:sl.x2,y2:sl.y2} : null
+if(typeof data.scaleConfigured==="boolean"){
+scaleConfigured=data.scaleConfigured
+}else{
+const scaleDistance=Number(data.scaleDistance)
+scaleConfigured=hasScaleLine && Number.isFinite(scaleDistance) && scaleDistance>0 && Number.isFinite(importedScale) && importedScale>0
+}
+updateCanvasInfo()
 mode="track"
 
 const importedCurrentPoint=Number.parseInt(data.currentPoint,10)

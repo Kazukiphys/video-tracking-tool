@@ -140,7 +140,7 @@ min-width:320px;
 
 <div class="fieldBlock">
 <label for="fpsInput">動画fps</label>
-<input id="fpsInput" type="number" value="30">
+<input id="fpsInput" type="number" value="30" style="width:100px;">
 <button onclick="setFPS()">fps設定</button>
 </div>
 
@@ -152,7 +152,6 @@ min-width:320px;
 <div class="fieldBlock">
 <div class="buttonRow">
 <button onclick="mode='origin'">原点設定</button>
-<button onclick="startScale()">スケール設定</button>
 </div>
 </div>
 
@@ -165,12 +164,13 @@ min-width:320px;
 
 <div class="fieldBlock">
 <label for="scaleInput">距離(m)</label>
-<input id="scaleInput" type="number" value="1" step="0.01">
+<input id="scaleInput" type="number" value="1" step="0.01" style="width:100px;">
+<button onclick="startScale()">スケール設定</button>
 </div>
 
 <div class="fieldBlock">
 <label for="pointCount">トラッキング点数</label>
-<input id="pointCount" type="number" value="1">
+<input id="pointCount" type="number" value="1" style="width:100px;">
 <button onclick="initPoints()">設定</button>
 </div>
 

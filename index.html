@@ -43,6 +43,56 @@ font-size:14px;
 margin-bottom:6px;
 }
 
+.trackLegend{
+margin-bottom:8px;
+}
+
+.trackLegendItem{
+display:flex;
+align-items:center;
+justify-content:space-between;
+gap:12px;
+padding:2px 0;
+}
+
+.trackLegendLabel{
+display:flex;
+align-items:center;
+gap:4px;
+}
+
+.trackLegendCheckbox{
+margin:0;
+}
+
+.trackColorPicker{
+position:relative;
+width:18px;
+height:18px;
+border:1px solid #333;
+border-radius:50%;
+overflow:hidden;
+flex:none;
+cursor:pointer;
+}
+
+.trackColorSwatch{
+display:block;
+width:100%;
+height:100%;
+}
+
+.trackColorPicker input{
+position:absolute;
+inset:0;
+width:100%;
+height:100%;
+padding:0;
+border:0;
+opacity:0;
+cursor:pointer;
+}
+
 .buttonRow{
 display:flex;
 flex-wrap:wrap;
@@ -191,6 +241,8 @@ min-width:320px;
 <button onclick="initPoints()">設定</button>
 </div>
 
+<div id="trackLegend" class="trackLegend" aria-live="polite"></div>
+
 <div class="fieldBlock">
 <button onclick="mode='track'">トラッキング</button>
 </div>
@@ -257,6 +309,8 @@ let tracks=[]
 let undoStack=[]
 let redoStack=[]
 let pointNum=1
+let activeTracks=[true]
+let trackColors=[getTrackColor(0)]
 let currentPoint=0
 let currentFrame=0
 let totalFrames=0
@@ -266,6 +320,114 @@ let isSteppingFrame=false
 let drawLoopStarted=false
 
 const SEEK_TIMEOUT_MS=800
+
+
+function getTrackColor(index){
+const hue=(index*137.508)%360
+const saturation=0.8
+const lightness=0.45
+const chroma=(1-Math.abs(2*lightness-1))*saturation
+const secondary=chroma*(1-Math.abs((hue/60)%2-1))
+const offset=lightness-chroma/2
+let red=0
+let green=0
+let blue=0
+
+if(hue<60){
+red=chroma
+green=secondary
+}else if(hue<120){
+red=secondary
+green=chroma
+}else if(hue<180){
+green=chroma
+blue=secondary
+}else if(hue<240){
+green=secondary
+blue=chroma
+}else if(hue<300){
+red=secondary
+blue=chroma
+}else{
+red=chroma
+blue=secondary
+}
+
+return `#${[red,green,blue].map(channel=>Math.round((channel+offset)*255).toString(16).padStart(2,"0")).join("")}`
+}
+
+
+function getTrackColorForIndex(index){
+return trackColors[index] || getTrackColor(index)
+}
+
+
+function updateTrackLegend(){
+const legend=document.getElementById("trackLegend")
+legend.replaceChildren()
+
+for(let i=0;i<pointNum;i++){
+const item=document.createElement("div")
+item.className="trackLegendItem"
+
+const labelGroup=document.createElement("label")
+labelGroup.className="trackLegendLabel"
+
+const checkbox=document.createElement("input")
+checkbox.type="checkbox"
+checkbox.className="trackLegendCheckbox"
+checkbox.checked=activeTracks[i]!==false
+checkbox.setAttribute("aria-label",`point ${i+1}を有効にする`)
+checkbox.addEventListener("change",()=>{
+activeTracks[i]=checkbox.checked
+const nextTrack=getNextEnabledTrackIndex(currentPoint)
+currentPoint=nextTrack===-1 ? 0 : nextTrack
+})
+
+const label=document.createElement("span")
+label.textContent=`point ${i+1}`
+labelGroup.append(checkbox,label)
+
+const colorPicker=document.createElement("label")
+colorPicker.className="trackColorPicker"
+colorPicker.title=`point ${i+1}の色を変更`
+
+const color=document.createElement("span")
+color.className="trackColorSwatch"
+color.style.backgroundColor=getTrackColorForIndex(i)
+
+const colorInput=document.createElement("input")
+colorInput.type="color"
+colorInput.value=getTrackColorForIndex(i)
+colorInput.setAttribute("aria-label",`point ${i+1}の色を変更`)
+colorInput.addEventListener("change",()=>{
+const previousColor=trackColors[i]
+if(previousColor===colorInput.value) return
+pushUndo(()=>{
+trackColors[i]=previousColor
+updateTrackLegend()
+})
+trackColors[i]=colorInput.value
+updateTrackLegend()
+})
+
+colorPicker.append(color,colorInput)
+item.append(labelGroup,colorPicker)
+legend.append(item)
+}
+}
+
+
+function getNextEnabledTrackIndex(startIndex){
+for(let offset=0;offset<pointNum;offset++){
+const index=(startIndex+offset)%pointNum
+if(activeTracks[index]!==false) return index
+}
+return -1
+}
+
+
+updateTrackLegend()
 
 
 document.getElementById("gridToggle").addEventListener("change",e=>{
@@ -314,6 +476,8 @@ scaleConfigured,
 scaleLine:scaleLine ? {...scaleLine} : null,
 tracks:tracks.map(track=>track.map(point=>({...point}))),
 pointNum,
+activeTracks:[...activeTracks],
+trackColors:[...trackColors],
 currentPoint,
 currentFrame,
 pendingFrameFromImport,
@@ -333,6 +497,8 @@ scaleConfigured=state.scaleConfigured
 scaleLine=state.scaleLine
 tracks=state.tracks
 pointNum=state.pointNum
+activeTracks=state.activeTracks
+trackColors=state.trackColors
 currentPoint=state.currentPoint
 currentFrame=state.currentFrame
 pendingFrameFromImport=state.pendingFrameFromImport
@@ -343,6 +509,7 @@ document.getElementById("scaleInput").value=state.scaleInput
 document.getElementById("pointCount").value=state.pointCountInput
 document.getElementById("gridToggle").checked=showGrid
 document.getElementById("frameSlider").max=Math.max(0,totalFrames-1)
+updateTrackLegend()
 updateCanvasInfo()
 if(video.readyState>=2 && totalFrames>0){
 setFrame(currentFrame)
@@ -581,22 +748,37 @@ return
 
 const previousTracks=tracks
 const previousPointNum=pointNum
+const previousActiveTracks=activeTracks
+const previousTrackColors=trackColors
 const previousCurrentPoint=currentPoint
 pushUndo(()=>{
 tracks=previousTracks
 pointNum=previousPointNum
+activeTracks=previousActiveTracks
+trackColors=previousTrackColors
 currentPoint=previousCurrentPoint
 document.getElementById("pointCount").value=String(pointNum)
+updateTrackLegend()
 })
 
 // 既存データは保持し，点数に合わせて追加・削除のみ行う
 tracks=tracks.slice(0,newNum)
+activeTracks=activeTracks.slice(0,newNum)
+trackColors=trackColors.slice(0,newNum)
 while(tracks.length<newNum){
 tracks.push([])
 }
+while(activeTracks.length<newNum){
+activeTracks.push(true)
+}
+while(trackColors.length<newNum){
+trackColors.push(null)
+}
 
 pointNum=newNum
-if(currentPoint>=pointNum) currentPoint=0
+const nextTrack=getNextEnabledTrackIndex(currentPoint%pointNum)
+currentPoint=nextTrack===-1 ? 0 : nextTrack
+updateTrackLegend()
 
 }
 
@@ -709,7 +891,8 @@ if(mode=="track"){
 
 if(isSteppingFrame) return
 
-const trackIndex=currentPoint
+const trackIndex=getNextEnabledTrackIndex(currentPoint)
+if(trackIndex===-1) return
 const trackedFrame=currentFrame
 const previousCurrentPoint=currentPoint
 const previousPoint=tracks[trackIndex]?.find(point=>getPointFrame(point)===trackedFrame)
@@ -728,13 +911,15 @@ currentFrame=trackedFrame
 updateFrameUI()
 }
 })
-upsertTrackPoint(currentPoint,currentFrame,x,y)
+upsertTrackPoint(trackIndex,currentFrame,x,y)
 
-currentPoint++
-
-if(currentPoint>=pointNum){
-
+const nextTrack=getNextEnabledTrackIndex((trackIndex+1)%pointNum)
+if(nextTrack===-1){
 currentPoint=0
+}else{
+currentPoint=nextTrack
+}
+if(nextTrack===-1 || nextTrack<=trackIndex){
 void nextFrame()
 
 }
@@ -854,9 +1039,10 @@ ctx.stroke()
 
 function drawTracks(){
 
-tracks.forEach(track=>{
+tracks.forEach((track,index)=>{
 
-ctx.strokeStyle="rgba(30,120,255,0.45)"
+ctx.save()
+ctx.strokeStyle=getTrackColorForIndex(index)
 ctx.lineWidth=1
 
 track.forEach(p=>{
@@ -864,6 +1050,8 @@ track.forEach(p=>{
 drawPlusMarker(p.x,p.y,5)
 
 })
+
+ctx.restore()
 
 })
 
@@ -920,44 +1108,55 @@ alert("原点を設定してください")
 return
 }
 
-let csv="point,time,x(m),y(m),vx(m/s),vy(m/s),speed(m/s)\n"
+const measurements=[
+{key:"x",unit:"(m)"},
+{key:"y",unit:"(m)"},
+{key:"vx",unit:"(m/s)"},
+{key:"vy",unit:"(m/s)"},
+{key:"speed",unit:"(m/s)"}
+]
+const trackValues=tracks.map(track=>{
+const valuesByFrame=new Map()
 
-tracks.forEach((track,i)=>{
+for(let i=0;i<track.length;i++){
+const point=track[i]
+const frame=getPointFrame(point)
+if(!Number.isFinite(frame)) continue
 
-for(let j=0;j<track.length;j++){
+const x=(point.x-origin.x)*scale
+const y=(origin.y-point.y)*scale
+const values={x,y,vx:"",vy:"",speed:""}
 
-let p=track[j]
-
-let x=(p.x-origin.x)*scale
-let y=(origin.y-p.y)*scale
-
-let vx=""
-let vy=""
-let speed=""
-
-if(j>0){
-
-let p0=track[j-1]
-
-let x0=(p0.x-origin.x)*scale
-let y0=(origin.y-p0.y)*scale
-
-let dx=x-x0
-let dy=y-y0
-
-let dt=p.t-p0.t
-
-vx=dx/dt
-vy=dy/dt
-
-speed=Math.sqrt(vx*vx+vy*vy)
-
+if(i>0){
+const previousPoint=track[i-1]
+const previousX=(previousPoint.x-origin.x)*scale
+const previousY=(origin.y-previousPoint.y)*scale
+const elapsedTime=point.t-previousPoint.t
+values.vx=(x-previousX)/elapsedTime
+values.vy=(y-previousY)/elapsedTime
+values.speed=Math.sqrt(values.vx*values.vx+values.vy*values.vy)
 }
 
-csv+=`${i},${p.t},${x},${y},${vx},${vy},${speed}\n`
-
+valuesByFrame.set(frame,values)
 }
 
+return valuesByFrame
+})
+const frames=[...new Set(trackValues.flatMap(values=>[...values.keys()]))].sort((a,b)=>a-b)
+const headers=["time"]
+measurements.forEach(({key,unit})=>{
+trackValues.forEach((_,index)=>headers.push(`${key}${index+1}${unit}`))
+})
+let csv=`${headers.join(",")}\n`
+
+frames.forEach(frame=>{
+const row=[getFrameTime(frame)]
+measurements.forEach(({key})=>{
+trackValues.forEach(values=>{
+row.push(values.get(frame)?.[key] ?? "")
+})
+})
+csv+=`${row.join(",")}\n`
 })
 
 const blob=new Blob([csv],{type:"text/csv"})
@@ -981,6 +1180,8 @@ frameRate,
 showGrid,
 scaleConfigured,
 pointNum,
+activeTracks:[...activeTracks],
+trackColors:[...trackColors],
 currentPoint,
 currentFrame,
 origin,
@@ -1041,6 +1242,14 @@ importedPointNum=1
 }
 pointNum=importedPointNum
 document.getElementById("pointCount").value=String(pointNum)
+activeTracks=Array.from({length:pointNum},(_,index)=>
+Array.isArray(data.activeTracks) ? data.activeTracks[index]!==false : true
+)
+trackColors=Array.from({length:pointNum},(_,index)=>{
+const color=Array.isArray(data.trackColors) ? data.trackColors[index] : null
+return typeof color==="string" && /^#[0-9a-f]{6}$/i.test(color) ? color : null
+})
+updateTrackLegend()
 
 tracks=[]
 for(let i=0;i<pointNum;i++){
@@ -1073,8 +1282,9 @@ updateCanvasInfo()
 mode="track"
 
 const importedCurrentPoint=Number.parseInt(data.currentPoint,10)
-currentPoint=(Number.isFinite(importedCurrentPoint) && importedCurrentPoint>=0) ? importedCurrentPoint : 0
-if(currentPoint>=pointNum) currentPoint=0
+const startPoint=(Number.isFinite(importedCurrentPoint) && importedCurrentPoint>=0) ? importedCurrentPoint%pointNum : 0
+const nextEnabledTrack=getNextEnabledTrackIndex(startPoint)
+currentPoint=nextEnabledTrack===-1 ? 0 : nextEnabledTrack
 
 const importedCurrentFrame=Number.parseInt(data.currentFrame,10)
 const safeImportedFrame=(Number.isFinite(importedCurrentFrame) && importedCurrentFrame>=0) ? importedCurrentFrame : 0
@@ -1139,17 +1349,17 @@ CSV保存には原点設定が必須です。</li>
 その後，動画上で既知の長さ区間をドラッグします。</li>
 
 <li><b>トラッキング点数設定</b>：1フレームで追う点の数を入力して設定を押します。<br>
-1点なら1，2点同時に追うなら2を指定します。</li>
+1点なら1，2点同時に追うなら2を指定します。設定後，トラッキングボタンの上に各点の色が表示されます。</li>
 
 <li><b>トラッキング</b>：トラッキングボタンを押し，対象をクリックします。<br>
-指定した点数分をクリックすると，自動で次フレームに進みます。</li>
+チェックを入れた「point 1」などに対応する対象を，表示色を目印にクリックしてください。色付きの円をクリックすると色を変更できます。チェックを外した点はスキップされます。選択した点をすべてクリックすると，自動で次フレームに進みます。</li>
 
 <li><b>フレーム移動</b>：<span class="nowrapText">「◀ frame」「frame ▶」またはスライダーで前後のフレームへ移動できます。</span><br>
 誤クリックした場合は，前のフレームに戻って打ち直してください。</li>
 
-<li><b>CSV保存</b>：CSV保存を押すと，point，time，位置，速度が保存されます。</li>
+<li><b>CSV保存</b>：CSV保存を押すと，timeを共有した行に各点の位置（x1，x2，…，y1，y2，…）と速度が保存されます。点のデータがない時刻のセルは空欄になります。</li>
 
-<li><b>JSON保存・JSON読込</b>：JSON保存を押すと，作業状態（fps，原点，スケール，トラックなど）を保存できます。<br>
+<li><b>JSON保存・JSON読込</b>：JSON保存を押すと，作業状態（fps，原点，スケール，トラック，色など）を保存できます。<br>
 再開時はJSON読込で同じファイルを開き，必要に応じて同じ動画を読み込むと途中から続きができます。</li>
 
 </ol>

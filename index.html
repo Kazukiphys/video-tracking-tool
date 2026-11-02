@@ -99,6 +99,12 @@ flex-wrap:wrap;
 gap:8px;
 }
 
+.trackingVideoActions{
+display:flex;
+flex-direction:column;
+align-items:flex-start;
+}
+
 .analysisPanel{
 flex:1;
 min-width:0;
@@ -131,6 +137,12 @@ flex-wrap:wrap;
 gap:8px;
 margin-top:10px;
 margin-bottom:14px;
+}
+
+.trackingVideoStatus{
+min-height:1.4em;
+font-size:13px;
+color:#555;
 }
 
 canvas{
@@ -251,9 +263,13 @@ min-width:320px;
 <div class="buttonRow">
 <button onclick="exportCSV()">CSV保存</button>
 <button onclick="exportJSON()">JSON保存</button>
+<div class="trackingVideoActions">
+<button id="trackingVideoButton" onclick="exportTrackingVideo()">トラッキング動画保存</button>
 <button onclick="openJSONFile()">JSON読込</button>
+</div>
 <input type="file" id="jsonFile" accept="application/json,.json" style="display:none;">
 </div>
+<div id="trackingVideoStatus" class="trackingVideoStatus" aria-live="polite"></div>
 </div>
 </div>
 
@@ -318,8 +334,10 @@ let pendingFrameFromImport=null
 let showGrid=true
 let isSteppingFrame=false
 let drawLoopStarted=false
+let isExportingTrackingVideo=false
 
 const SEEK_TIMEOUT_MS=800
+const TRACKING_VIDEO_FRAME_MS=250
 
 
 function getTrackColor(index){
@@ -1101,6 +1119,221 @@ alert("このフレームのトラッキングデータを消去しました")
 }
 
 
+function waitForVideoData(sourceVideo){
+return new Promise((resolve,reject)=>{
+let timeoutId
+const cleanup=()=>{
+clearTimeout(timeoutId)
+sourceVideo.removeEventListener("loadeddata",onLoaded)
+sourceVideo.removeEventListener("error",onError)
+}
+const onLoaded=()=>{
+cleanup()
+resolve()
+}
+const onError=()=>{
+cleanup()
+reject(new Error("動画を読み込めませんでした"))
+}
+
+sourceVideo.addEventListener("loadeddata",onLoaded)
+sourceVideo.addEventListener("error",onError)
+timeoutId=setTimeout(()=>{
+cleanup()
+reject(new Error("動画の読み込みがタイムアウトしました"))
+},30000)
+sourceVideo.src=video.currentSrc || video.src
+sourceVideo.load()
+if(sourceVideo.readyState>=2) onLoaded()
+})
+}
+
+
+function seekExportVideoFrame(sourceVideo,frame,exportFrameRate){
+const targetTime=frame/exportFrameRate
+if(Math.abs(sourceVideo.currentTime-targetTime)<0.0001) return Promise.resolve()
+
+return new Promise((resolve,reject)=>{
+let timeoutId
+const cleanup=()=>{
+clearTimeout(timeoutId)
+sourceVideo.removeEventListener("seeked",onSeeked)
+sourceVideo.removeEventListener("error",onError)
+}
+const onSeeked=()=>{
+cleanup()
+resolve()
+}
+const onError=()=>{
+cleanup()
+reject(new Error("動画のフレーム移動に失敗しました"))
+}
+
+sourceVideo.addEventListener("seeked",onSeeked)
+sourceVideo.addEventListener("error",onError)
+timeoutId=setTimeout(()=>{
+cleanup()
+reject(new Error("動画のフレーム移動がタイムアウトしました"))
+},SEEK_TIMEOUT_MS)
+sourceVideo.currentTime=targetTime
+})
+}
+
+
+function drawTrackingVideoFrame(context,sourceVideo,outputCanvas,visiblePoints,colors){
+context.clearRect(0,0,outputCanvas.width,outputCanvas.height)
+context.drawImage(sourceVideo,0,0,outputCanvas.width,outputCanvas.height)
+
+visiblePoints.forEach(point=>{
+const size=5
+context.beginPath()
+context.moveTo(point.x-size,point.y)
+context.lineTo(point.x+size,point.y)
+context.moveTo(point.x,point.y-size)
+context.lineTo(point.x,point.y+size)
+context.strokeStyle=colors[point.trackIndex] || getTrackColor(point.trackIndex)
+context.lineWidth=1
+context.stroke()
+})
+}
+
+
+async function exportTrackingVideo(){
+if(isExportingTrackingVideo) return
+if(video.readyState<2 || !(video.currentSrc || video.src)){
+alert("先に動画を読み込んでください")
+return
+}
+if(typeof MediaRecorder==="undefined" || typeof HTMLCanvasElement.prototype.captureStream!=="function"){
+alert("このブラウザーでは動画の書き出しに対応していません")
+return
+}
+if(typeof MediaRecorder.isTypeSupported!=="function"){
+document.getElementById("trackingVideoStatus").textContent="MP4形式を確認できないため，動画を保存できません"
+alert("このブラウザーではMP4形式を確認できないため，動画を保存できません")
+return
+}
+const mp4MimeTypes=["video/mp4;codecs=avc1.42E01E","video/mp4"]
+const mimeType=mp4MimeTypes.find(type=>MediaRecorder.isTypeSupported(type))
+if(!mimeType){
+document.getElementById("trackingVideoStatus").textContent="MP4非対応のブラウザーでは保存できません"
+alert("このブラウザーはMP4動画の録画に対応していません。MP4対応ブラウザーでお試しください")
+return
+}
+
+const exportFrameRate=frameRate
+const trackedFrames=new Map()
+tracks.forEach((track,trackIndex)=>{
+track.forEach(point=>{
+const frame=Number.isFinite(point.frame) ? Math.round(point.frame) : (Number.isFinite(point.t) ? Math.round(point.t*exportFrameRate) : -1)
+if(frame<0 || frame>=totalFrames || !Number.isFinite(point.x) || !Number.isFinite(point.y)) return
+if(!trackedFrames.has(frame)) trackedFrames.set(frame,[])
+trackedFrames.get(frame).push({x:point.x,y:point.y,trackIndex})
+})
+})
+
+const trackedFrameNumbers=Array.from(trackedFrames.keys()).sort((a,b)=>a-b)
+if(trackedFrameNumbers.length===0){
+alert("書き出せるトラッキングデータがありません")
+return
+}
+const firstTrackedFrame=trackedFrameNumbers[0]
+const lastTrackedFrame=trackedFrameNumbers[trackedFrameNumbers.length-1]
+const frameCount=lastTrackedFrame-firstTrackedFrame+1
+
+const button=document.getElementById("trackingVideoButton")
+const status=document.getElementById("trackingVideoStatus")
+const exportVideo=document.createElement("video")
+const outputCanvas=document.createElement("canvas")
+outputCanvas.width=canvas.width
+outputCanvas.height=canvas.height
+const outputContext=outputCanvas.getContext("2d")
+const visiblePoints=[]
+const colors=Array.from({length:pointNum},(_,index)=>getTrackColorForIndex(index))
+const wait=milliseconds=>new Promise(resolve=>setTimeout(resolve,milliseconds))
+let stream=null
+let recorder=null
+let recorderError=null
+
+isExportingTrackingVideo=true
+button.disabled=true
+button.textContent="動画を作成中..."
+
+try{
+exportVideo.muted=true
+exportVideo.playsInline=true
+await waitForVideoData(exportVideo)
+await seekExportVideoFrame(exportVideo,firstTrackedFrame,exportFrameRate)
+
+stream=outputCanvas.captureStream(0)
+let outputTrack=stream.getVideoTracks()[0]
+let requestFrame=outputTrack && typeof outputTrack.requestFrame==="function"
+if(!requestFrame){
+stream.getTracks().forEach(track=>track.stop())
+stream=outputCanvas.captureStream(4)
+outputTrack=stream.getVideoTracks()[0]
+}
+
+recorder=new MediaRecorder(stream,{mimeType})
+const chunks=[]
+const recordingStopped=new Promise(resolve=>recorder.addEventListener("stop",resolve,{once:true}))
+recorder.addEventListener("dataavailable",event=>{
+if(event.data && event.data.size>0) chunks.push(event.data)
+})
+recorder.addEventListener("error",event=>{
+recorderError=event.error || new Error("動画の録画に失敗しました")
+})
+recorder.start()
+
+const captureStage=async(frameIndex,pointIndex)=>{
+drawTrackingVideoFrame(outputContext,exportVideo,outputCanvas,visiblePoints,colors)
+if(requestFrame) outputTrack.requestFrame()
+status.textContent=`動画を作成中: ${frameIndex+1}/${frameCount} コマ${pointIndex ? `・点 ${pointIndex}` : ""}`
+await wait(TRACKING_VIDEO_FRAME_MS)
+}
+
+for(let frame=firstTrackedFrame;frame<=lastTrackedFrame;frame++){
+const frameIndex=frame-firstTrackedFrame
+await seekExportVideoFrame(exportVideo,frame,exportFrameRate)
+await captureStage(frameIndex,0)
+
+const points=trackedFrames.get(frame) || []
+for(let pointIndex=0;pointIndex<points.length;pointIndex++){
+visiblePoints.push(points[pointIndex])
+await captureStage(frameIndex,pointIndex+1)
+}
+}
+
+recorder.stop()
+await recordingStopped
+if(recorderError) throw recorderError
+
+const outputMimeType=recorder.mimeType || mimeType
+if(!outputMimeType.startsWith("video/mp4")) throw new Error("ブラウザーがMP4形式で録画できませんでした")
+const blob=new Blob(chunks,{type:outputMimeType})
+if(blob.size===0) throw new Error("動画データを作成できませんでした")
+const downloadUrl=URL.createObjectURL(blob)
+const anchor=document.createElement("a")
+anchor.href=downloadUrl
+anchor.download="tracking_video.mp4"
+anchor.click()
+setTimeout(()=>URL.revokeObjectURL(downloadUrl),1000)
+status.textContent="トラッキング動画を保存しました (MP4)"
+}catch(error){
+if(recorder && recorder.state!=="inactive") recorder.stop()
+status.textContent="動画の書き出しに失敗しました"
+alert(`動画を書き出せませんでした: ${error.message}`)
+}finally{
+if(stream) stream.getTracks().forEach(track=>track.stop())
+exportVideo.removeAttribute("src")
+exportVideo.load()
+button.disabled=false
+button.textContent="トラッキング動画保存"
+isExportingTrackingVideo=false
+}
+}
+
+
 function exportCSV(){
 
 if(!origin){
@@ -1361,6 +1594,8 @@ CSV保存には原点設定が必須です。</li>
 
 <li><b>JSON保存・JSON読込</b>：JSON保存を押すと，作業状態（fps，原点，スケール，トラック，色など）を保存できます。<br>
 再開時はJSON読込で同じファイルを開き，必要に応じて同じ動画を読み込むと途中から続きができます。</li>
+
+<li><b>トラッキング動画保存</b>：最初にトラッキングしたコマから最後のコマまでを順に含むMP4動画を保存します。点を記録していないコマも含まれ，点は記録したコマで一つずつ現れます。MP4録画に対応していないブラウザーでは保存できません。前のコマまでの点も軌跡として表示されます。</li>
 
 </ol>
 

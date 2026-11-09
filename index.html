@@ -818,7 +818,38 @@ y:(e.clientY-rect.top)*scaleY
 }
 
 
+let axisDragging=false
+let axisDragBefore=null
+let suppressNextClick=false
+
+function getAxisAngle(){
+return origin?.angle || 0
+}
+
+function toAxisCoords(point){
+const a=getAxisAngle()
+const dx=point.x-origin.x
+const dy=origin.y-point.y
+return {
+x:dx*Math.cos(a)+dy*Math.sin(a),
+y:-dx*Math.sin(a)+dy*Math.cos(a)
+}
+}
+
+function isOnXAxis(p){
+const a=getAxisAngle()
+const dx=p.x-origin.x
+const dy=origin.y-p.y
+return Math.abs(-dx*Math.sin(a)+dy*Math.cos(a))<=8
+}
+
 canvas.addEventListener("mousedown",e=>{
+
+if(mode=="axis" && origin && isOnXAxis(getCanvasPoint(e))){
+axisDragging=true
+axisDragBefore={...origin}
+return
+}
 
 if(mode!="scale") return
 
@@ -836,7 +867,30 @@ dragging=true
 })
 
 
+window.addEventListener("mouseup",()=>{
+if(!axisDragging) return
+axisDragging=false
+suppressNextClick=true
+setTimeout(()=>{suppressNextClick=false},0)
+if(axisDragBefore.angle!==origin.angle){
+const before=axisDragBefore
+pushUndo(()=>{origin=before})
+}
+axisDragBefore=null
+})
+
 canvas.addEventListener("mousemove",e=>{
+
+if(axisDragging){
+const p=getCanvasPoint(e)
+let dx=p.x-origin.x
+let dy=origin.y-p.y
+if(dx<0){dx=-dx;dy=-dy}
+if(Math.hypot(dx,dy)>5){
+origin.angle=Math.atan2(dy,dx)
+}
+return
+}
 
 if(!dragging) return
 
@@ -888,6 +942,8 @@ mode="track"
 
 canvas.addEventListener("click",e=>{
 
+if(suppressNextClick) return
+
 const p=getCanvasPoint(e)
 
 let x=p.x
@@ -898,8 +954,8 @@ if(mode=="origin"){
 
 const previousOrigin=origin ? {...origin} : null
 pushUndo(()=>{origin=previousOrigin})
-origin={x,y}
-mode="track"
+origin={x,y,angle:previousOrigin?.angle||0}
+mode="axis"
 return
 
 }
@@ -977,17 +1033,19 @@ if(!origin) return
 ctx.save()
 
 ctx.lineWidth=2
+ctx.translate(origin.x,origin.y)
+ctx.rotate(-getAxisAngle())
+const L=Math.hypot(canvas.width,canvas.height)*2
 
 ctx.strokeStyle="rgba(255,80,80,0.8)"
 ctx.beginPath()
-ctx.moveTo(0,origin.y)
-ctx.lineTo(canvas.width,origin.y)
+ctx.moveTo(-L,0)
+ctx.lineTo(L,0)
 ctx.stroke()
 
-ctx.strokeStyle="rgba(255,80,80,0.8)"
 ctx.beginPath()
-ctx.moveTo(origin.x,0)
-ctx.lineTo(origin.x,canvas.height)
+ctx.moveTo(0,-L)
+ctx.lineTo(0,L)
 ctx.stroke()
 
 ctx.restore()
@@ -1004,32 +1062,17 @@ const spacing=40
 ctx.save()
 ctx.strokeStyle="rgba(255,255,255,0.28)"
 ctx.lineWidth=1
+ctx.translate(origin.x,origin.y)
+ctx.rotate(-getAxisAngle())
+const L=Math.hypot(canvas.width,canvas.height)*2
 
-for(let x=origin.x;x<=canvas.width;x+=spacing){
+for(let k=-Math.floor(L/spacing);k<=Math.floor(L/spacing);k++){
+const v=k*spacing
 ctx.beginPath()
-ctx.moveTo(x,0)
-ctx.lineTo(x,canvas.height)
-ctx.stroke()
-}
-
-for(let x=origin.x-spacing;x>=0;x-=spacing){
-ctx.beginPath()
-ctx.moveTo(x,0)
-ctx.lineTo(x,canvas.height)
-ctx.stroke()
-}
-
-for(let y=origin.y;y<=canvas.height;y+=spacing){
-ctx.beginPath()
-ctx.moveTo(0,y)
-ctx.lineTo(canvas.width,y)
-ctx.stroke()
-}
-
-for(let y=origin.y-spacing;y>=0;y-=spacing){
-ctx.beginPath()
-ctx.moveTo(0,y)
-ctx.lineTo(canvas.width,y)
+ctx.moveTo(v,-L)
+ctx.lineTo(v,L)
+ctx.moveTo(-L,v)
+ctx.lineTo(L,v)
 ctx.stroke()
 }
 
@@ -1356,14 +1399,16 @@ const point=track[i]
 const frame=getPointFrame(point)
 if(!Number.isFinite(frame)) continue
 
-const x=(point.x-origin.x)*scale
-const y=(origin.y-point.y)*scale
+const axisPoint=toAxisCoords(point)
+const x=axisPoint.x*scale
+const y=axisPoint.y*scale
 const values={x,y,vx:"",vy:"",speed:""}
 
 if(i>0){
 const previousPoint=track[i-1]
-const previousX=(previousPoint.x-origin.x)*scale
-const previousY=(origin.y-previousPoint.y)*scale
+const previousAxisPoint=toAxisCoords(previousPoint)
+const previousX=previousAxisPoint.x*scale
+const previousY=previousAxisPoint.y*scale
 const elapsedTime=point.t-previousPoint.t
 values.vx=(x-previousX)/elapsedTime
 values.vy=(y-previousY)/elapsedTime
@@ -1491,7 +1536,7 @@ tracks.push(srcTrack.map(sanitizeTrackPoint).filter(Boolean))
 }
 
 if(data.origin && Number.isFinite(data.origin.x) && Number.isFinite(data.origin.y)){
-origin={x:data.origin.x,y:data.origin.y}
+origin={x:data.origin.x,y:data.origin.y,angle:Number.isFinite(data.origin.angle) ? data.origin.angle : 0}
 }else{
 origin=null
 }
@@ -1575,6 +1620,9 @@ reader.readAsText(file)
 
 <li><b>原点設定</b>：原点設定ボタンを押して，動画上の基準点を1回クリックします。<br>
 原点設定後は座標軸が表示されます。<br>
+原点設定の直後は軸の調整モードになり，x軸（赤い横線）をクリックしたまま上下に動かすと座標軸の傾きを変えられます。y軸は常にx軸に垂直です。傾きはCSVの座標・速度やグリッド線にも反映されます。<br>
+軸の調整中は点を記録できません。調整が終わったら「トラッキング」ボタンを押してください。<br>
+傾きを直したいときは，原点設定をやり直してから調整します（傾きは引き継がれます）。<br>
 「グリッド線を表示」のチェックで，補助線の表示を切り替えられます。<br>
 CSV保存には原点設定が必須です。</li>
 
@@ -1584,7 +1632,7 @@ CSV保存には原点設定が必須です。</li>
 <li><b>トラッキング点数設定</b>：1フレームで追う点の数を入力して設定を押します。<br>
 1点なら1，2点同時に追うなら2を指定します。設定後，トラッキングボタンの上に各点の色が表示されます。</li>
 
-<li><b>トラッキング</b>：トラッキングボタンを押し，対象をクリックします。<br>
+<li><b>トラッキング</b>：トラッキングボタンを押すと軸の調整が終了し，以後は対象をクリックして点を記録します。<br>
 チェックを入れた「point 1」などに対応する対象を，表示色を目印にクリックしてください。色付きの円をクリックすると色を変更できます。チェックを外した点はスキップされます。選択した点をすべてクリックすると，自動で次フレームに進みます。</li>
 
 <li><b>フレーム移動</b>：<span class="nowrapText">「◀ frame」「frame ▶」またはスライダーで前後のフレームへ移動できます。</span><br>
@@ -1592,7 +1640,7 @@ CSV保存には原点設定が必須です。</li>
 
 <li><b>CSV保存</b>：CSV保存を押すと，timeを共有した行に各点の位置（x1，x2，…，y1，y2，…）と速度が保存されます。点のデータがない時刻のセルは空欄になります。</li>
 
-<li><b>JSON保存・JSON読込</b>：JSON保存を押すと，作業状態（fps，原点，スケール，トラック，色など）を保存できます。<br>
+<li><b>JSON保存・JSON読込</b>：JSON保存を押すと，作業状態（fps，原点と軸の傾き，スケール，トラック，色など）を保存できます。<br>
 再開時はJSON読込で同じファイルを開き，必要に応じて同じ動画を読み込むと途中から続きができます。</li>
 
 <li><b>トラッキング動画保存</b>：最初にトラッキングしたコマから最後のコマまでを順に含むMP4動画を保存します。点を記録していないコマも含まれ，点は記録したコマで一つずつ現れます。MP4録画に対応していないブラウザーでは保存できません。前のコマまでの点も軌跡として表示されます。</li>
